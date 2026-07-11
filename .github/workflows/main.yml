@@ -2,14 +2,13 @@ name: Surveillance stock PortaSplit
 
 on:
   schedule:
-    # Lancement demande toutes les 30 min. GitHub retarde/saute souvent, mais
-    # chaque execution vit ~50 min et verifie toutes les 5 min : les executions
-    # se chevauchent, donc la surveillance reste continue.
-    - cron: '3,33 * * * *'
+    # Toutes les 30 min. Chaque execution vit ~50 min et verifie toutes les
+    # 15 min : cadence volontairement DOUCE pour ne pas se faire bloquer.
+    - cron: '11,41 * * * *'
   workflow_dispatch:
     inputs:
       test:
-        description: 'Test Telegram ? (choisir "oui" pour recevoir un message de test)'
+        description: 'Test Telegram ? (oui = message de test)'
         type: choice
         options:
           - 'non'
@@ -18,8 +17,6 @@ on:
 
 permissions:
   contents: write
-
-# Pas de "concurrency" : on VEUT que les executions se chevauchent.
 
 jobs:
   check:
@@ -30,24 +27,27 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - run: pip install requests
-      - name: Surveiller en boucle (50 min, verif toutes les 5 min)
+      # curl-cffi imite la signature technique de Chrome : c'est ce qui permet
+      # de passer les protections anti-robot (Cloudflare) qui bloquaient Python.
+      - run: pip install "curl-cffi>=0.6" requests
+      - name: Surveiller en boucle
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           TEST_PING: "${{ github.event.inputs.test == 'oui' && '1' || '' }}"
         run: |
           python - <<'PYEOF'
-          import json, os, sys, time
+          import json, os, random, sys, time
           from datetime import datetime, timezone
           from pathlib import Path
           from urllib.parse import urlparse
-          import requests
+
+          import requests                      # pour Telegram uniquement
+          from curl_cffi import requests as nav  # navigateur imite (anti-blocage)
 
           # ===== TES PAGES SURVEILLEES ==============================
-          # ATTENTION : n'utilise JAMAIS "Ajouter au panier" ni "EN STOCK"
-          # comme marqueur — ces textes sont presents dans le HTML meme
-          # quand le produit est epuise (= fausses alertes garanties).
+          # NE JAMAIS utiliser "Ajouter au panier" ni "EN STOCK" comme marqueur :
+          # ces textes existent dans le HTML meme quand le produit est epuise.
           TARGETS = [
               {
                   "name": "Midea PortaSplit — ManoMano",
@@ -62,15 +62,12 @@ jobs:
           ]
           # ==========================================================
 
-          BOUCLE_MINUTES = 50      # duree de vie de cette execution
-          INTERVALLE_SEC = 300     # 5 min entre deux verifications
+          BOUCLE_MINUTES = 50     # duree de vie de cette execution
+          INTERVALLE_SEC = 900    # 15 min entre deux verifications (cadence douce)
+          SEUIL_BLOCAGE  = 4      # nb d'echecs consecutifs avant de te prevenir
 
           STATE_FILE = Path("state.json")
-          HEADERS = {
-              "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile Safari/604.1",
-              "Accept-Language": "fr-FR,fr;q=0.9,en;q=0.8",
-          }
-          TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
+          TOKEN   = os.environ.get("TELEGRAM_TOKEN", "")
           CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
           def send_telegram(text):
@@ -85,7 +82,7 @@ jobs:
                   )
                   if r.status_code != 200:
                       print("!! Erreur Telegram :", r.status_code, r.text[:200])
-              except requests.RequestException as e:
+              except Exception as e:
                   print("!! Telegram injoignable :", e)
 
           def in_stock(html, t):
@@ -97,13 +94,19 @@ jobs:
               return None
 
           def check(t):
+              """Retourne True (dispo), False (rupture) ou None (echec/bloque)."""
               try:
-                  r = requests.get(t["url"], headers=HEADERS, timeout=30)
-              except requests.RequestException as e:
-                  print(f"      [{t['name']}] echec reseau : {e}")
+                  r = nav.get(
+                      t["url"],
+                      impersonate="chrome",       # <-- la cle : on ressemble a Chrome
+                      timeout=40,
+                      headers={"Accept-Language": "fr-FR,fr;q=0.9"},
+                  )
+              except Exception as e:
+                  print(f"      [{t['name']}] echec reseau : {type(e).__name__}")
                   return None
               if r.status_code != 200:
-                  print(f"      [{t['name']}] HTTP {r.status_code} — ignore ce tour.")
+                  print(f"      [{t['name']}] HTTP {r.status_code} — bloque/indispo.")
                   return None
               return in_stock(r.text, t)
 
@@ -119,7 +122,6 @@ jobs:
                   return 0
 
               etat = lire_etat()
-              deja_alerte = {n: (v.get("in_stock") is True) for n, v in etat.items()}
               modifie = False
               labels = {True: "EN STOCK", False: "rupture", None: "inconnu"}
 
@@ -127,36 +129,54 @@ jobs:
               tour = 0
               while True:
                   tour += 1
-                  horo = datetime.now(timezone.utc).strftime("%H:%M:%S")
-                  print(f"--- tour {tour} ({horo} UTC) ---")
+                  print(f"--- tour {tour} ({datetime.now(timezone.utc):%H:%M:%S} UTC) ---")
                   for t in TARGETS:
                       nom = t["name"]
-                      etat_actuel = check(t)
-                      print(f"      [{nom}] {labels[etat_actuel]}")
+                      e = etat.setdefault(nom, {})
+                      res = check(t)
+                      print(f"      [{nom}] {labels[res]}")
 
-                      if etat_actuel is True and not deja_alerte.get(nom):
-                          send_telegram(
-                              f"🟢 EN STOCK : {nom}\n{urlparse(t['url']).netloc}\n{t['url']}"
-                          )
-                          deja_alerte[nom] = True
-                      elif etat_actuel is False:
-                          deja_alerte[nom] = False
+                      if res is None:
+                          # --- echec : on compte, et on TE PREVIENT si ca dure ---
+                          e["fails"] = e.get("fails", 0) + 1
+                          if e["fails"] >= SEUIL_BLOCAGE and not e.get("blocage_signale"):
+                              send_telegram(
+                                  "⚠️ SURVEILLANCE AVEUGLE\n"
+                                  f"{nom}\nLe site bloque mes requetes : je ne peux plus "
+                                  "voir le stock. Verifie manuellement en attendant."
+                              )
+                              e["blocage_signale"] = True
+                              modifie = True
+                      else:
+                          # --- acces OK : on repart proprement ---
+                          if e.get("blocage_signale"):
+                              send_telegram(f"✅ Acces retabli : je resurveille {nom}.")
+                              modifie = True
+                          e["fails"] = 0
+                          e["blocage_signale"] = False
 
-                      if etat_actuel is not None and etat_actuel != etat.get(nom, {}).get("in_stock"):
-                          etat[nom] = {"in_stock": etat_actuel, "checked_at": int(time.time())}
-                          modifie = True
-                      time.sleep(2)
+                          if res is True and e.get("in_stock") is not True:
+                              send_telegram(
+                                  f"🟢 EN STOCK : {nom}\n{urlparse(t['url']).netloc}\n{t['url']}"
+                              )
+                          if e.get("in_stock") != res:
+                              modifie = True
+                          e["in_stock"] = res
+                          e["checked_at"] = int(time.time())
+
+                      time.sleep(random.uniform(3, 9))   # rythme irregulier = moins robotique
 
                   if time.time() >= fin:
                       break
-                  time.sleep(min(INTERVALLE_SEC, max(0, fin - time.time())))
+                  pause = INTERVALLE_SEC + random.uniform(-60, 60)
+                  time.sleep(min(pause, max(0, fin - time.time())))
 
               if modifie:
                   STATE_FILE.write_text(
                       json.dumps(etat, indent=2, ensure_ascii=False), encoding="utf-8"
                   )
                   print("state.json mis a jour.")
-              print(f"Fin : {tour} verifications effectuees.")
+              print(f"Fin : {tour} tours effectues.")
               return 0
 
           sys.exit(main())
