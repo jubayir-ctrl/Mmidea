@@ -2,9 +2,9 @@ name: Surveillance stock PortaSplit
 
 on:
   schedule:
-    # On demande le lancement toutes les 30 min. GitHub retarde/saute souvent,
-    # mais chaque execution vit ~50 min et verifie en boucle toutes les 5 min :
-    # les executions se chevauchent, donc la surveillance reste continue.
+    # Lancement demande toutes les 30 min. GitHub retarde/saute souvent, mais
+    # chaque execution vit ~50 min et verifie toutes les 5 min : les executions
+    # se chevauchent, donc la surveillance reste continue.
     - cron: '3,33 * * * *'
   workflow_dispatch:
     inputs:
@@ -19,8 +19,7 @@ on:
 permissions:
   contents: write
 
-# Pas de "concurrency" ici : on VEUT que les executions puissent se chevaucher,
-# sinon un lancement en retard annulerait celui qui est en train de surveiller.
+# Pas de "concurrency" : on VEUT que les executions se chevauchent.
 
 jobs:
   check:
@@ -45,15 +44,23 @@ jobs:
           from urllib.parse import urlparse
           import requests
 
-          # ===== A EDITER : tes pages a surveiller =====
+          # ===== TES PAGES SURVEILLEES ==============================
+          # ATTENTION : n'utilise JAMAIS "Ajouter au panier" ni "EN STOCK"
+          # comme marqueur — ces textes sont presents dans le HTML meme
+          # quand le produit est epuise (= fausses alertes garanties).
           TARGETS = [
               {
                   "name": "Midea PortaSplit — ManoMano",
                   "url": "https://www.manomano.fr/p/midea-climatiseur-split-mobile-reversible-froid-chaud-3500w12000btu-wifi-deshumidificateur-ventilateur-jusqua-40m2-kit-fenetre-inclus-83810402",
                   "out_of_stock_marker": "Produit épuisé",
               },
+              {
+                  "name": "Midea PortaSplit — Optimea (officiel)",
+                  "url": "https://www.optimea.fr/product/climatiseur-split-mobile-midea/",
+                  "out_of_stock_marker": "out of stock",
+              },
           ]
-          # =============================================
+          # ==========================================================
 
           BOUCLE_MINUTES = 50      # duree de vie de cette execution
           INTERVALLE_SEC = 300     # 5 min entre deux verifications
@@ -111,10 +118,7 @@ jobs:
                   send_telegram("Test OK : le surveillant de stock est bien configure.")
                   return 0
 
-              # Etat partage entre executions (evite de re-alerter en boucle).
               etat = lire_etat()
-              # Memoire locale a cette execution : evite de renvoyer une alerte
-              # a chaque tour de boucle si le produit reste en stock.
               deja_alerte = {n: (v.get("in_stock") is True) for n, v in etat.items()}
               modifie = False
               labels = {True: "EN STOCK", False: "rupture", None: "inconnu"}
@@ -145,7 +149,6 @@ jobs:
 
                   if time.time() >= fin:
                       break
-                  # On ne depasse jamais la fin prevue.
                   time.sleep(min(INTERVALLE_SEC, max(0, fin - time.time())))
 
               if modifie:
