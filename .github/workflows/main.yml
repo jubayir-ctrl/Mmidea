@@ -2,7 +2,10 @@ name: Surveillance stock PortaSplit
 
 on:
   schedule:
-    - cron: '*/5 * * * *'
+    # On demande le lancement toutes les 30 min. GitHub retarde/saute souvent,
+    # mais chaque execution vit ~50 min et verifie en boucle toutes les 5 min :
+    # les executions se chevauchent, donc la surveillance reste continue.
+    - cron: '3,33 * * * *'
   workflow_dispatch:
     inputs:
       test:
@@ -16,21 +19,20 @@ on:
 permissions:
   contents: write
 
-concurrency:
-  group: stock-check
-  cancel-in-progress: false
+# Pas de "concurrency" ici : on VEUT que les executions puissent se chevaucher,
+# sinon un lancement en retard annulerait celui qui est en train de surveiller.
 
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 55
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
       - run: pip install requests
-      - name: Verifier les stocks
+      - name: Surveiller en boucle (50 min, verif toutes les 5 min)
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -38,14 +40,12 @@ jobs:
         run: |
           python - <<'PYEOF'
           import json, os, sys, time
+          from datetime import datetime, timezone
           from pathlib import Path
           from urllib.parse import urlparse
           import requests
 
           # ===== A EDITER : tes pages a surveiller =====
-          # Pour ajouter une enseigne, copie un bloc en respectant la meme forme.
-          # N'ajoute que des sites dont le signal de stock est FIABLE dans le HTML
-          # (sinon risque de fausse alerte).
           TARGETS = [
               {
                   "name": "Midea PortaSplit — ManoMano",
@@ -54,6 +54,9 @@ jobs:
               },
           ]
           # =============================================
+
+          BOUCLE_MINUTES = 50      # duree de vie de cette execution
+          INTERVALLE_SEC = 300     # 5 min entre deux verifications
 
           STATE_FILE = Path("state.json")
           HEADERS = {
@@ -90,47 +93,79 @@ jobs:
               try:
                   r = requests.get(t["url"], headers=HEADERS, timeout=30)
               except requests.RequestException as e:
-                  print(f"   [{t['name']}] echec reseau : {e}")
+                  print(f"      [{t['name']}] echec reseau : {e}")
                   return None
               if r.status_code != 200:
-                  print(f"   [{t['name']}] HTTP {r.status_code} — ignore ce tour.")
+                  print(f"      [{t['name']}] HTTP {r.status_code} — ignore ce tour.")
                   return None
               return in_stock(r.text, t)
+
+          def lire_etat():
+              try:
+                  return json.loads(STATE_FILE.read_text(encoding="utf-8"))
+              except (FileNotFoundError, json.JSONDecodeError):
+                  return {}
 
           def main():
               if os.environ.get("TEST_PING"):
                   send_telegram("Test OK : le surveillant de stock est bien configure.")
                   return 0
-              try:
-                  state = json.loads(STATE_FILE.read_text(encoding="utf-8"))
-              except (FileNotFoundError, json.JSONDecodeError):
-                  state = {}
-              changed = False
+
+              # Etat partage entre executions (evite de re-alerter en boucle).
+              etat = lire_etat()
+              # Memoire locale a cette execution : evite de renvoyer une alerte
+              # a chaque tour de boucle si le produit reste en stock.
+              deja_alerte = {n: (v.get("in_stock") is True) for n, v in etat.items()}
+              modifie = False
               labels = {True: "EN STOCK", False: "rupture", None: "inconnu"}
-              for t in TARGETS:
-                  name = t["name"]
-                  now = check(t)
-                  prev = state.get(name, {}).get("in_stock")
-                  print(f"   [{name}] {labels[now]}")
-                  if now is True and prev is not True:
-                      send_telegram(f"🟢 EN STOCK : {name}\n{urlparse(t['url']).netloc}\n{t['url']}")
-                  if now is not None and now != prev:
-                      state[name] = {"in_stock": now, "checked_at": int(time.time())}
-                      changed = True
-                  time.sleep(2)
-              if changed:
-                  STATE_FILE.write_text(json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8")
+
+              fin = time.time() + BOUCLE_MINUTES * 60
+              tour = 0
+              while True:
+                  tour += 1
+                  horo = datetime.now(timezone.utc).strftime("%H:%M:%S")
+                  print(f"--- tour {tour} ({horo} UTC) ---")
+                  for t in TARGETS:
+                      nom = t["name"]
+                      etat_actuel = check(t)
+                      print(f"      [{nom}] {labels[etat_actuel]}")
+
+                      if etat_actuel is True and not deja_alerte.get(nom):
+                          send_telegram(
+                              f"🟢 EN STOCK : {nom}\n{urlparse(t['url']).netloc}\n{t['url']}"
+                          )
+                          deja_alerte[nom] = True
+                      elif etat_actuel is False:
+                          deja_alerte[nom] = False
+
+                      if etat_actuel is not None and etat_actuel != etat.get(nom, {}).get("in_stock"):
+                          etat[nom] = {"in_stock": etat_actuel, "checked_at": int(time.time())}
+                          modifie = True
+                      time.sleep(2)
+
+                  if time.time() >= fin:
+                      break
+                  # On ne depasse jamais la fin prevue.
+                  time.sleep(min(INTERVALLE_SEC, max(0, fin - time.time())))
+
+              if modifie:
+                  STATE_FILE.write_text(
+                      json.dumps(etat, indent=2, ensure_ascii=False), encoding="utf-8"
+                  )
                   print("state.json mis a jour.")
+              print(f"Fin : {tour} verifications effectuees.")
               return 0
 
           sys.exit(main())
           PYEOF
       - name: Sauvegarder l'etat
+        if: always()
         run: |
           if [[ -n "$(git status --porcelain state.json)" ]]; then
             git config user.name "stock-bot"
             git config user.email "stock-bot@users.noreply.github.com"
             git add state.json
             git commit -m "maj etat stock [skip ci]"
-            git push
+            git pull --rebase --autostash || true
+            git push || echo "push ignore (execution concurrente)"
           fi
