@@ -1,48 +1,121 @@
-name: Surveillance stock PortaSplit
+#!/usr/bin/env python3
+# ---------------------------------------------------------------------------
+# Surveillance de stock — version "tout sur iPhone".
+# Tu edites UNIQUEMENT la liste TARGETS ci-dessous.
+# Les 2 secrets TELEGRAM_TOKEN et TELEGRAM_CHAT_ID se mettent cote GitHub
+# (Settings > Secrets and variables > Actions), pas dans ce fichier.
+# ---------------------------------------------------------------------------
 
-on:
-  schedule:
-    # ~toutes les 15 min. GitHub : minimum 5 min, horaires non garantis.
-    - cron: '7,22,37,52 * * * *'
-  workflow_dispatch:
-    inputs:
-      test:
-        description: 'Test Telegram ? (choisir "oui" pour recevoir un message de test)'
-        type: choice
-        options:
-          - 'non'
-          - 'oui'
-        default: 'non'
+import json
+import os
+import sys
+import time
+from pathlib import Path
+from urllib.parse import urlparse
 
-permissions:
-  contents: write
+import requests
 
-concurrency:
-  group: stock-check
-  cancel-in-progress: false
+# ===== A EDITER : tes pages a surveiller ===================================
+TARGETS = [
+    {
+        "name": "Midea PortaSplit — Boulanger",
+        "url": "https://www.boulanger.com/ref/REMPLACE_MOI",
+        # texte present QUAND c'est dispo :
+        "in_stock_marker": "Ajouter au panier",
+    },
+    {
+        "name": "Midea PortaSplit — Leroy Merlin",
+        "url": "https://www.leroymerlin.fr/produits/REMPLACE_MOI.html",
+        # OU texte present QUAND c'est en rupture :
+        "out_of_stock_marker": "Indisponible",
+    },
+]
+# ==========================================================================
 
-jobs:
-  check:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - run: pip install requests
-      - name: Verifier les stocks
-        env:
-          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          TEST_PING: "${{ github.event.inputs.test == 'oui' && '1' || '' }}"
-        run: python check_stock.py
-      - name: Sauvegarder l'etat
-        run: |
-          if [[ -n "$(git status --porcelain state.json)" ]]; then
-            git config user.name "stock-bot"
-            git config user.email "stock-bot@users.noreply.github.com"
-            git add state.json
-            git commit -m "maj etat stock [skip ci]"
-            git push
-          fi
+STATE_FILE = Path(__file__).parent / "state.json"
+
+HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
+        "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile Safari/604.1"
+    ),
+    "Accept-Language": "fr-FR,fr;q=0.9,en;q=0.8",
+}
+
+TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
+CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
+
+
+def send_telegram(text: str) -> None:
+    if not TOKEN or not CHAT_ID:
+        print("!! Secrets Telegram manquants — alerte non envoyee :", text)
+        return
+    try:
+        r = requests.post(
+            f"https://api.telegram.org/bot{TOKEN}/sendMessage",
+            json={"chat_id": CHAT_ID, "text": text},
+            timeout=20,
+        )
+        if r.status_code != 200:
+            print("!! Erreur Telegram :", r.status_code, r.text[:200])
+    except requests.RequestException as e:
+        print("!! Telegram injoignable :", e)
+
+
+def in_stock(html: str, t: dict):
+    low = html.lower()
+    if "in_stock_marker" in t:
+        return t["in_stock_marker"].lower() in low
+    if "out_of_stock_marker" in t:
+        return t["out_of_stock_marker"].lower() not in low
+    return None
+
+
+def check(t: dict):
+    try:
+        r = requests.get(t["url"], headers=HEADERS, timeout=30)
+    except requests.RequestException as e:
+        print(f"   [{t['name']}] echec reseau : {e}")
+        return None
+    if r.status_code != 200:
+        print(f"   [{t['name']}] HTTP {r.status_code} — ignore ce tour.")
+        return None
+    return in_stock(r.text, t)
+
+
+def main() -> int:
+    if os.environ.get("TEST_PING"):
+        send_telegram("Test OK : le surveillant de stock est bien configure.")
+        return 0
+
+    try:
+        state = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError):
+        state = {}
+
+    changed = False
+    labels = {True: "EN STOCK", False: "rupture", None: "inconnu"}
+
+    for t in TARGETS:
+        name = t["name"]
+        now = check(t)
+        prev = state.get(name, {}).get("in_stock")
+        print(f"   [{name}] {labels[now]}")
+
+        if now is True and prev is not True:  # bascule -> EN STOCK
+            send_telegram(f"🟢 EN STOCK : {name}\n{urlparse(t['url']).netloc}\n{t['url']}")
+
+        if now is not None and now != prev:
+            state[name] = {"in_stock": now, "checked_at": int(time.time())}
+            changed = True
+
+        time.sleep(2)
+
+    if changed:
+        STATE_FILE.write_text(json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8")
+        print("state.json mis a jour.")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
