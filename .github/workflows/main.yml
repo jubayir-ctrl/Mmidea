@@ -43,16 +43,33 @@ jobs:
           import requests
 
           # ===== A EDITER : tes pages a surveiller =====
+          # ManoMano est deja pret (URL reelle + marqueur verifie).
+          # Pour les 4 autres : remplace REMPLACE_MOI par la vraie URL de la fiche.
           TARGETS = [
               {
-                  "name": "Midea PortaSplit — Boulanger",
-                  "url": "https://www.boulanger.com/ref/REMPLACE_MOI",
-                  "in_stock_marker": "Ajouter au panier",
+                  "name": "Midea PortaSplit — ManoMano",
+                  "url": "https://www.manomano.fr/p/midea-climatiseur-split-mobile-reversible-froid-chaud-3500w12000btu-wifi-deshumidificateur-ventilateur-jusqua-40m2-kit-fenetre-inclus-83810402",
+                  "out_of_stock_marker": "Produit épuisé",
+              },
+              {
+                  "name": "Midea PortaSplit — Darty",
+                  "url": "https://www.darty.com/REMPLACE_MOI",
+                  "out_of_stock_marker": "plus disponible",
+              },
+              {
+                  "name": "Midea PortaSplit — Fnac",
+                  "url": "https://www.fnac.com/REMPLACE_MOI",
+                  "out_of_stock_marker": "plus disponible",
               },
               {
                   "name": "Midea PortaSplit — Leroy Merlin",
-                  "url": "https://www.leroymerlin.fr/produits/REMPLACE_MOI.html",
-                  "out_of_stock_marker": "Indisponible",
+                  "url": "https://www.leroymerlin.fr/REMPLACE_MOI",
+                  "out_of_stock_marker": "indisponible",
+              },
+              {
+                  "name": "Midea PortaSplit — Castorama",
+                  "url": "https://www.castorama.fr/REMPLACE_MOI",
+                  "out_of_stock_marker": "indisponible",
               },
           ]
           # =============================================
