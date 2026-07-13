@@ -1,7 +1,7 @@
 {
   "Midea PortaSplit — ManoMano": {
-    "fails": 0,
-    "blocage_signale": false,
+    "fails": 5,
+    "blocage_signale": true,
     "in_stock": false,
     "checked_at": 1783934816
   },
@@ -9,6 +9,6 @@
     "fails": 0,
     "blocage_signale": false,
     "in_stock": false,
-    "checked_at": 1783934821
+    "checked_at": 1783965147
   }
 }
