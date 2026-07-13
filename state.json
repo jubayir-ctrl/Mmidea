@@ -1,14 +1,14 @@
 {
   "Midea PortaSplit — ManoMano": {
-    "fails": 6,
-    "blocage_signale": true,
+    "fails": 0,
+    "blocage_signale": false,
     "in_stock": false,
-    "checked_at": 1783870204
+    "checked_at": 1783934816
   },
   "Midea PortaSplit — Optimea (officiel)": {
     "fails": 0,
     "blocage_signale": false,
     "in_stock": false,
-    "checked_at": 1783882986
+    "checked_at": 1783934821
   }
 }
